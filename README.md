@@ -173,7 +173,3 @@ python -m unittest discover tests
 - 添加更多测试用例
 - 优化前端用户体验
 - 提供更多配置选项
-
-## 许可证
-
-MIT
