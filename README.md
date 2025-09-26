@@ -68,7 +68,7 @@ AI Agent/
 
 ```bash
 # 克隆项目到本地
-git clone https://your-repository-url.git
+git clone https://github.com/xingsen2005/AI_Aggregate.git
 cd AI Agent
 ```
 
