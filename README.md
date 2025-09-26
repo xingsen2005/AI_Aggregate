@@ -1,4 +1,4 @@
-# 多AI聚合应用
+# AI_Aggregate
 
 ## 项目概述
 
