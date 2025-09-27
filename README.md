@@ -2,24 +2,16 @@
 
 ## 项目概述
 
-<<<<<<< Updated upstream
-一款多 AI 聚合应用，支持用户提交单个问题并同时向多个 AI 模型发起查询，集成各 AI 模型官方 API，实现多 AI 输出结果同步查看，并确保所有 AI 模型能获取其他模型的输出内容。
-
 对应大模型平台的 API Keys 请自行准备。
-=======
+
 这是一款多 AI 聚合应用，支持用户提交单个问题并同时向多个 AI 模型发起查询，集成各 AI 模型官方 API，实现多 AI 输出结果同步查看，并确保所有 AI 模型能获取其他模型的输出内容。
->>>>>>> Stashed changes
 
 ## 功能特性
 
 - **用户界面**：使用 Element Plus 组件库构建，提供优雅的用户体验和响应式布局
 - **实时通信**：通过 Socket.IO 实现前后端实时通信和结果推送
 - **后端服务**：采用 Flask 框架提供 API 服务，支持异步任务处理
-<<<<<<< Updated upstream
 - **AI模型集成**：支持豆包、通义千问、Deepseek、ChatGPT、Kimi、腾讯混元、Gemini 等模型
-=======
-- **AI 模型集成**：支持豆包、Deepseek、ChatGPT、Kimi、腾讯混元、Gemini 等 AI 模型
->>>>>>> Stashed changes
 - **模拟模式**：在没有 Redis 或 API Key 的情况下，可以使用模拟数据进行测试
 - **完整的错误处理**：包含结构化日志记录和友好的错误提示
 
@@ -43,7 +35,7 @@
 ## 项目结构
 
 ```
-AI Agent/
+AI Aggregate/
 ├── frontend/                 # 前端项目
 │   ├── src/                  # 前端源码
 │   │   ├── main.js           # 入口文件
@@ -164,27 +156,18 @@ python -m unittest discover tests
 ```
 
 ## 注意事项
-
-<<<<<<< Updated upstream
 - 在生产环境中，请确保修改 CORS 配置以限制允许的源
 - 请妥善保管 API 密钥，不要将其提交到版本控制系统
-=======
 - 在生产环境中，请确保修改 `backend/app.py` 中的 CORS 配置以限制允许的源
 - 请妥善保管您的 API 密钥，不要将其提交到版本控制系统
->>>>>>> Stashed changes
 - 模拟模式下 AI 模型的响应是模拟数据，用于开发和测试
 
 ## 故障排除
 
 - **连接问题**：检查后端服务是否正常运行，以及前端 WebSocket 连接 URL 是否正确
-<<<<<<< Updated upstream
 - **API密钥错误**：确保 .env 文件中配置了正确的API密钥
 - **Redis错误**：如果不需要 Redis，可以使用模拟模式启动服务
 - **端口冲突**：如果端口 5000 或 3000 已被占用，可以修改相应的配置文件
-=======
-- **API 密钥错误**：确保 `.env` 文件中配置了正确的 API 密钥
-- **Redis错误**：如果不需要 Redis，可以使用模拟模式启动服务
-- **端口冲突**：如果端口 5000 或 3000 已被占用，可以修改 `backend/app.py` 中的 `PORT` 配置
 
 ## 未来改进
 
@@ -193,4 +176,3 @@ python -m unittest discover tests
 - 添加更多测试用例
 - 优化前端用户体验
 - 提供更多配置选项
->>>>>>> Stashed changes
