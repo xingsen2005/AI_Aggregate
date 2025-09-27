@@ -100,7 +100,7 @@ npm install
 在 `backend/.env` 文件中配置所需的环境变量：
 
 ```
-# AI模型API密钥
+# AI 模型 API 密钥
 DOUBAO_API_KEY=
 DEEPSEEK_API_KEY=
 OPENAI_API_KEY=
@@ -108,7 +108,7 @@ KIMI_API_KEY=
 TX_HUNYUAN_API_KEY=
 GOOGLE_API_KEY=
 
-# Redis配置(仅在非模拟模式下需要)
+# Redis 配置(仅在非模拟模式下需要)
 REDIS_URL=redis://localhost:6379/0
 
 # 服务器配置
