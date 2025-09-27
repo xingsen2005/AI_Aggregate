@@ -13,11 +13,7 @@
 - **用户界面**：使用 Element Plus 组件库构建，提供优雅的用户体验和响应式布局
 - **实时通信**：通过 Socket.IO 实现前后端实时通信和结果推送
 - **后端服务**：采用 Flask 框架提供 API 服务，支持异步任务处理
-
-- **AI模型集成**：支持豆包、通义千问、Deepseek、ChatGPT、Kimi、腾讯混元、Gemini 等模型
-
-- **AI 模型集成**：支持豆包、Deepseek、ChatGPT、Kimi、腾讯混元、Gemini 等 AI 模型
-
+- **AI 模型集成**：支持豆包、通义千问、Deepseek、ChatGPT、Kimi、腾讯混元、Gemini 等模型
 - **模拟模式**：在没有 Redis 或 API Key 的情况下，可以使用模拟数据进行测试
 - **完整的错误处理**：包含结构化日志记录和友好的错误提示
 
