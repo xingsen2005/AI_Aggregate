@@ -24,173 +24,16 @@
       <!-- AI模型结果展示区域 -->
       <div class="ai-results">
         <div class="ai-models-grid">
-          <!-- 豆包 -->
-          <el-card class="ai-card" :header="getHeader('豆包', 'doubao')">
-            <div class="ai-content" v-if="results.doubao">
-              <div v-html="formatContent(results.doubao.content)"></div>
-              <div class="ai-actions">
-                <el-button
-                  size="small"
-                  type="primary"
-                  @click="regenerateResponse('doubao')"
-                  :loading="loading.doubao"
-                >
-                  <el-icon><Refresh /></el-icon>
-                  重新生成
-                </el-button>
-                <el-button
-                  size="small"
-                  @click="deleteResponse('doubao')"
-                >
-                  <el-icon><Delete /></el-icon>
-                  删除内容
-                </el-button>
-              </div>
-            </div>
-            <div v-else class="empty-state">
-              暂无内容
-            </div>
-          </el-card>
-          
-          <!-- Deepseek -->
-          <el-card class="ai-card" :header="getHeader('Deepseek', 'deepseek')">
-            <div class="ai-content" v-if="results.deepseek">
-              <div v-html="formatContent(results.deepseek.content)"></div>
-              <div class="ai-actions">
-                <el-button
-                  size="small"
-                  type="primary"
-                  @click="regenerateResponse('deepseek')"
-                  :loading="loading.deepseek"
-                >
-                  <el-icon><Refresh /></el-icon>
-                  重新生成
-                </el-button>
-                <el-button
-                  size="small"
-                  @click="deleteResponse('deepseek')"
-                >
-                  <el-icon><Delete /></el-icon>
-                  删除内容
-                </el-button>
-              </div>
-            </div>
-            <div v-else class="empty-state">
-              暂无内容
-            </div>
-          </el-card>
-          
-          <!-- ChatGPT -->
-          <el-card class="ai-card" :header="getHeader('ChatGPT', 'chatgpt')">
-            <div class="ai-content" v-if="results.chatgpt">
-              <div v-html="formatContent(results.chatgpt.content)"></div>
-              <div class="ai-actions">
-                <el-button
-                  size="small"
-                  type="primary"
-                  @click="regenerateResponse('chatgpt')"
-                  :loading="loading.chatgpt"
-                >
-                  <el-icon><Refresh /></el-icon>
-                  重新生成
-                </el-button>
-                <el-button
-                  size="small"
-                  @click="deleteResponse('chatgpt')"
-                >
-                  <el-icon><Delete /></el-icon>
-                  删除内容
-                </el-button>
-              </div>
-            </div>
-            <div v-else class="empty-state">
-              暂无内容
-            </div>
-          </el-card>
-          
-          <!-- Kimi -->
-          <el-card class="ai-card" :header="getHeader('Kimi', 'kimi')">
-            <div class="ai-content" v-if="results.kimi">
-              <div v-html="formatContent(results.kimi.content)"></div>
-              <div class="ai-actions">
-                <el-button
-                  size="small"
-                  type="primary"
-                  @click="regenerateResponse('kimi')"
-                  :loading="loading.kimi"
-                >
-                  <el-icon><Refresh /></el-icon>
-                  重新生成
-                </el-button>
-                <el-button
-                  size="small"
-                  @click="deleteResponse('kimi')"
-                >
-                  <el-icon><Delete /></el-icon>
-                  删除内容
-                </el-button>
-              </div>
-            </div>
-            <div v-else class="empty-state">
-              暂无内容
-            </div>
-          </el-card>
-          
-          <!-- 腾讯混元 -->
-          <el-card class="ai-card" :header="getHeader('腾讯混元', 'hunyuan')">
-            <div class="ai-content" v-if="results.hunyuan">
-              <div v-html="formatContent(results.hunyuan.content)"></div>
-              <div class="ai-actions">
-                <el-button
-                  size="small"
-                  type="primary"
-                  @click="regenerateResponse('hunyuan')"
-                  :loading="loading.hunyuan"
-                >
-                  <el-icon><Refresh /></el-icon>
-                  重新生成
-                </el-button>
-                <el-button
-                  size="small"
-                  @click="deleteResponse('hunyuan')"
-                >
-                  <el-icon><Delete /></el-icon>
-                  删除内容
-                </el-button>
-              </div>
-            </div>
-            <div v-else class="empty-state">
-              暂无内容
-            </div>
-          </el-card>
-          
-          <!-- Gemini -->
-          <el-card class="ai-card" :header="getHeader('Gemini', 'gemini')">
-            <div class="ai-content" v-if="results.gemini">
-              <div v-html="formatContent(results.gemini.content)"></div>
-              <div class="ai-actions">
-                <el-button
-                  size="small"
-                  type="primary"
-                  @click="regenerateResponse('gemini')"
-                  :loading="loading.gemini"
-                >
-                  <el-icon><Refresh /></el-icon>
-                  重新生成
-                </el-button>
-                <el-button
-                  size="small"
-                  @click="deleteResponse('gemini')"
-                >
-                  <el-icon><Delete /></el-icon>
-                  删除内容
-                </el-button>
-              </div>
-            </div>
-            <div v-else class="empty-state">
-              暂无内容
-            </div>
-          </el-card>
+          <AI-Model-Card
+            v-for="(model, key) in modelConfigs"
+            :key="key"
+            :model-name="model.name"
+            :model-key="key"
+            :result="results[key]"
+            :is-loading="loading[key]"
+            @regenerate="regenerateResponse"
+            @delete="deleteResponse"
+          />
         </div>
       </div>
     </main>
@@ -203,20 +46,29 @@
 
 <script>
 import { ref, onMounted, onUnmounted } from 'vue';
-import { Refresh, Delete } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import axios from 'axios';
 import { io } from 'socket.io-client';
+import AIModelCard from './components/AIModelCard.vue';
 
 export default {
   name: 'App',
   components: {
-    Refresh,
-    Delete
+    AIModelCard
   },
   setup() {
     // 用户输入
     const userInput = ref('');
+    
+    // 模型配置
+    const modelConfigs = ref({
+      doubao: { name: '豆包' },
+      deepseek: { name: 'Deepseek' },
+      chatgpt: { name: 'ChatGPT' },
+      kimi: { name: 'Kimi' },
+      hunyuan: { name: '腾讯混元' },
+      gemini: { name: 'Gemini' }
+    });
     
     // AI模型结果
     const results = ref({
@@ -249,39 +101,7 @@ export default {
     // Socket.IO连接
     let socket = null;
     
-    // 获取卡片头部
-    const getHeader = (name, model) => {
-      if (results.value[model] && results.value[model].status === 'generating') {
-        return name + ' (生成中...)';
-      }
-      return name;
-    };
-    
-    // 格式化内容
-    const formatContent = (content) => {
-      if (!content) return '';
-      
-      // 简单的XSS防护
-      const escapeHtml = (unsafe) => {
-        return unsafe
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;')
-          .replace(/"/g, '&quot;')
-          .replace(/'/g, '&#039;');
-      };
-      
-      // 先进行HTML转义，再进行Markdown解析
-      const escapedContent = escapeHtml(content);
-      
-      // 简单的Markdown解析，实际应用中可以使用更完整的Markdown解析库
-      return escapedContent
-        .replace(/\n/g, '<br>')
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*(.*?)\*/g, '<em>$1</em>')
-        .replace(/`(.*?)`/g, '<code>$1</code>')
-        .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
-    };
+
     
     // 连接Socket.IO
     const connectSocketIO = () => {

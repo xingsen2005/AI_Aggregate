@@ -7,11 +7,15 @@ import traceback
 import hashlib
 import collections
 import random
-# 导入eventlet并进行monkey patch
-import eventlet
-eventlet.monkey_patch()
+import jwt
 
-from flask import Flask, request, jsonify
+# 设置FLASK_APP环境变量
+os.environ['FLASK_APP'] = 'app.py'
+# 为了简化测试，暂时不使用eventlet
+# import eventlet
+# eventlet.monkey_patch()
+
+from flask import Flask, request, jsonify, make_response
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 from celery import Celery
@@ -19,6 +23,11 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from dotenv import load_dotenv
+
+# 导入新的模块
+from .utils import validate_and_clean_input, escape_html, generate_cache_key, RateLimiter, safe_json_loads
+from .model_handlers import call_model_api, handle_simulation_request, format_model_response
+from .task_manager import TaskPoolManager, BatchProcessor, ask_all_models as new_ask_all_models, initialize_task_manager, process_model_request, check_cached_result
 
 # 加载环境变量
 load_dotenv()
@@ -28,9 +37,8 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key')
 
 # 创建SocketIO实例
-# 配置SocketIO使用eventlet作为异步模式
-async_mode = 'eventlet'
-socketio = SocketIO(app, async_mode=async_mode, cors_allowed_origins="*")
+# 使用默认的异步模式
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 # 配置CORS
 CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -132,6 +140,110 @@ def get_ai_models():
 # 初始化AI模型配置
 AI_MODELS = get_ai_models()
 
+# 初始化任务管理器
+try:
+    initialize_task_manager()
+    logger.info("任务管理器初始化成功")
+except Exception as e:
+    logger.error(f"任务管理器初始化失败: {str(e)}")
+
+# API密钥验证装饰器
+def require_api_key(f):
+    """验证请求中是否包含有效的API密钥"""
+    def decorator(*args, **kwargs):
+        # 从环境变量获取有效的API密钥列表
+        valid_api_keys = os.getenv('VALID_API_KEYS', '').split(',')
+        valid_api_keys = [key.strip() for key in valid_api_keys if key.strip()]
+        
+        # 如果没有配置有效的API密钥，允许所有请求
+        if not valid_api_keys:
+            logger.warning('没有配置有效的API密钥，允许所有请求')
+            return f(*args, **kwargs)
+        
+        # 从请求头中获取API密钥
+        api_key = request.headers.get('X-API-Key')
+        
+        # 也支持从查询参数中获取API密钥
+        if not api_key:
+            api_key = request.args.get('api_key')
+        
+        # 检查API密钥是否有效
+        if not api_key or api_key not in valid_api_keys:
+            logger.warning(f'无效的API密钥: {api_key}，请求被拒绝')
+            return make_response(jsonify({
+                'success': False,
+                'error': 'Unauthorized: Invalid or missing API key'
+            }), 401)
+        
+        logger.info(f'API密钥验证通过: {api_key[:5]}...')
+        return f(*args, **kwargs)
+    
+    # 保留原始函数的元数据
+    decorator.__name__ = f.__name__
+    decorator.__doc__ = f.__doc__
+    return decorator
+
+# JWT验证装饰器
+def require_jwt(f):
+    """验证请求中是否包含有效的JWT令牌"""
+    def decorator(*args, **kwargs):
+        # 从环境变量获取JWT密钥
+        jwt_secret = os.getenv('JWT_SECRET')
+        
+        # 如果未配置JWT密钥，使用简单的API密钥验证
+        if not jwt_secret:
+            logger.warning('没有配置JWT密钥，跳过JWT验证')
+            return require_api_key(f)(*args, **kwargs)
+        
+        # 从请求头中获取JWT令牌
+        auth_header = request.headers.get('Authorization')
+        
+        if not auth_header:
+            logger.warning('Authorization头缺失')
+            return make_response(jsonify({
+                'success': False,
+                'error': 'Unauthorized: Missing Authorization header'
+            }), 401)
+        
+        # 检查Authorization头的格式
+        if not auth_header.startswith('Bearer '):
+            logger.warning('Authorization头格式错误')
+            return make_response(jsonify({
+                'success': False,
+                'error': 'Unauthorized: Invalid Authorization header format'
+            }), 401)
+        
+        # 提取JWT令牌
+        token = auth_header.split(' ')[1]
+        
+        try:
+            # 验证JWT令牌
+            decoded = jwt.decode(token, jwt_secret, algorithms=['HS256'])
+            logger.info(f'JWT验证通过: {decoded.get("user_id", "unknown")}')
+            
+            # 将解码后的信息添加到请求上下文中
+            request.user_info = decoded
+            
+        except jwt.ExpiredSignatureError:
+            logger.warning('JWT令牌已过期')
+            return make_response(jsonify({
+                'success': False,
+                'error': 'Unauthorized: Token has expired'
+            }), 401)
+        except jwt.InvalidTokenError:
+            logger.warning('无效的JWT令牌')
+            return make_response(jsonify({
+                'success': False,
+                'error': 'Unauthorized: Invalid token'
+            }), 401)
+        
+        return f(*args, **kwargs)
+    
+    # 保留原始函数的元数据
+    decorator.__name__ = f.__name__
+    decorator.__doc__ = f.__doc__
+    return decorator
+
 # 模型资源配置
 MODEL_RESOURCES = {
     'doubao': {
@@ -186,6 +298,40 @@ HIGH_CPU_THRESHOLD = 80  # CPU使用率高阈值（%）
 HIGH_MEMORY_THRESHOLD = 85  # 内存使用率高阈值（%）
 BATCH_CLIENT_THRESHOLD = 5  # 批处理客户端数量阈值
 
+# 用于存储客户端消息队列的字典
+client_message_queues = {}
+
+# 用于保护client_message_queues的锁
+message_queue_lock = threading.Lock()
+
+# 发送消息给客户端的函数
+def send_message_to_client(client_id, data):
+    """发送消息给指定的客户端
+    
+    参数:
+        client_id: 客户端ID
+        data: 要发送的消息数据
+    """
+    try:
+        # 尝试通过Socket.IO发送消息
+        with app.app_context():
+            # 为指定客户端发送消息
+            socketio.emit('ai_response', data, room=client_id)
+        logger.debug(f'已通过Socket.IO发送消息给客户端: {client_id}')
+    except Exception as e:
+        # 如果Socket.IO发送失败，将消息存储到队列中供轮询使用
+        logger.warning(f'Socket.IO发送消息失败，将消息添加到轮询队列: {str(e)}')
+        with message_queue_lock:
+            if client_id not in client_message_queues:
+                client_message_queues[client_id] = []
+            # 添加时间戳
+            data_with_timestamp = data.copy()
+            data_with_timestamp['queued_at'] = time.time()
+            client_message_queues[client_id].append(data_with_timestamp)
+            # 限制队列大小，防止内存溢出
+            if len(client_message_queues[client_id]) > 100:
+                client_message_queues[client_id] = client_message_queues[client_id][-50:]
+
 # LRU缓存实现
 class LRUCache:
     def __init__(self, capacity):
@@ -206,9 +352,15 @@ class LRUCache:
         if key in self.cache:
             # 如果键已存在，先移除
             del self.cache[key]
+            # 同时从last_accessed中移除
+            if key in self.last_accessed:
+                del self.last_accessed[key]
         elif len(self.cache) >= self.capacity:
             # 如果缓存已满，删除最久未使用的元素（最前面的）
-            self.cache.popitem(last=False)
+            oldest_key, _ = self.cache.popitem(last=False)
+            # 同时从last_accessed中移除最久未使用的元素
+            if oldest_key in self.last_accessed:
+                del self.last_accessed[oldest_key]
         # 将新元素添加到末尾
         self.cache[key] = value
         self.last_accessed[key] = time.time()
@@ -222,6 +374,19 @@ class LRUCache:
         
     def get_all_keys(self):
         return list(self.cache.keys())
+        
+    def _sync_last_accessed(self):
+        """确保last_accessed字典与cache字典保持同步"""
+        # 找出cache中不存在的键并删除
+        for key in list(self.last_accessed.keys()):
+            if key not in self.cache:
+                del self.last_accessed[key]
+        # 记录当前时间
+        current_time = time.time()
+        # 确保cache中的所有键都在last_accessed中
+        for key in self.cache:
+            if key not in self.last_accessed:
+                self.last_accessed[key] = current_time
 
 # 从环境变量获取缓存配置
 CACHE_SIZE_LIMIT = int(os.environ.get('CACHE_SIZE_LIMIT', 1000))
@@ -229,6 +394,45 @@ CACHE_TTL = int(os.environ.get('CACHE_TTL', 3600))  # 缓存有效时间（秒�
 
 # 创建缓存实例
 result_cache = LRUCache(CACHE_SIZE_LIMIT)
+
+# 检查单个缓存项是否过期
+def _is_cache_expired(cache, key, current_time=None):
+    """检查单个缓存项是否过期"""
+    if current_time is None:
+        current_time = time.time()
+    
+    # 检查键是否存在于last_accessed中
+    if key not in cache.last_accessed:
+        # 如果键不在last_accessed中，则认为已过期
+        logger.warning(f'缓存键 {key} 不在last_accessed字典中')
+        return True
+    
+    # 计算已经过的时间
+    elapsed_time = current_time - cache.last_accessed[key]
+    # 如果已经超过TTL，则缓存项已过期
+    return elapsed_time > CACHE_TTL
+
+# 获取缓存，同时检查过期状态
+def get_cached_response(model_id, cache_key):
+    """获取缓存响应，并在获取时检查是否过期（懒加载检查）"""
+    if model_id not in model_caches or not cache_key:
+        return None
+    
+    cache = model_caches[model_id]
+    cached_response = cache.get(cache_key)
+    
+    # 懒加载检查：如果缓存存在但已过期，则删除并返回None
+    if cached_response and _is_cache_expired(cache, cache_key):
+        logger.debug(f'缓存项已过期，删除: {model_id}, {cache_key}')
+        try:
+            del cache.cache[cache_key]
+            if cache_key in cache.last_accessed:
+                del cache.last_accessed[cache_key]
+        except KeyError:
+            pass
+        return None
+    
+    return cached_response
 
 # 缓存管理器线程
 class CacheManager(threading.Thread):
@@ -253,6 +457,9 @@ class CacheManager(threading.Thread):
         """清理过期的缓存项"""
         current_time = time.time()
         expired_keys = []
+        
+        # 同步last_accessed和cache字典
+        result_cache._sync_last_accessed()
         
         # 找出过期的键
         for key, access_time in result_cache.last_accessed.items():
@@ -282,8 +489,13 @@ def generate_cache_key(model_id, query, **kwargs):
         **kwargs: 其他参数
         
     返回:
-        唯一的缓存键字符串
+        唯一的缓存键字符串，如果query为空则返回None
     """
+    # 如果查询文本为空，不生成缓存键
+    if not query:
+        logger.warning('尝试为为空的查询生成缓存键')
+        return None
+    
     # 创建参数字典，只包含影响结果的关键参数
     cache_params = {
         'model_id': model_id,
@@ -440,121 +652,87 @@ SIMULATION_RESPONSES = {
     ]
 }
 
-# 模拟AI模型处理函数
+# 重构后的call_ai_model函数
 @celery.task(bind=True, name='app.call_ai_model')
 def call_ai_model(self, model_id, query, other_results=None, request_id=None, client_ids=None, cache_key=None, **kwargs):
-    """调用指定的AI模型进行处理
-    
-    参数:
-        model_id: 模型ID
-        query: 用户查询内容
-        other_results: 其他模型的结果（用于批处理请求）
-        request_id: 请求ID
-        client_ids: 客户端ID列表（用于批处理请求）
-        cache_key: 可选的缓存键
-        **kwargs: 其他参数
-    
-    返回:
-        包含响应内容和状态的字典
-    """
+    """调用指定的AI模型进行处理，重构版本"""
     # 记录开始时间
     start_time = time.time()
-    
-    # 获取模型配置
-    model_config = AI_MODELS.get(model_id)
-    resource_config = MODEL_RESOURCES.get(model_id, {})
-    
-    if not model_config:
-        return {
-            'status': 'error',
-            'model_id': model_id,
-            'error': f'Model {model_id} not found',
-            'timestamp': int(time.time() * 1000),
-            'response_time': 0
-        }
-    
-    if not model_config.get('enabled', False):
-        return {
-            'status': 'error',
-            'model_id': model_id,
-            'error': model_config.get('disabled_reason', 'Model not enabled'),
-            'timestamp': int(time.time() * 1000),
-            'response_time': 0
-        }
+    logger.info(f"收到模型调用请求: {model_id}, 请求ID: {request_id}")
     
     try:
-        # 处理模拟模式
-        if model_config.get('simulation', False) or SIMULATION_MODE:
-            # 模拟网络延迟
-            delay = random.uniform(1.0, 3.0)  # 随机延迟1-3秒
-            time.sleep(delay)
+        # 创建响应回调函数
+        def response_callback(result, client_id):
+            # 发送结果到Socket.IO（如果请求ID存在）
+            if request_id:
+                with app.app_context():
+                    socketio.emit('ai_response', {
+                        'request_id': request_id,
+                        'model_id': model_id,
+                        'result': result
+                    })
             
-            # 随机选择一个模拟响应
-            responses = SIMULATION_RESPONSES.get(model_id, ["模拟响应"])
-            response_text = random.choice(responses)
-            
-            result = {
-                'status': 'success',
-                'model_id': model_id,
-                'content': response_text,
-                'timestamp': int(time.time() * 1000),
-                'response_time': int((time.time() - start_time) * 1000)
+            # 构造发送给客户端的数据
+            client_data = {
+                'model': model_id,
+                'status': result.get('status', 'success'),
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
             }
+            
+            if result.get('status') == 'success':
+                client_data['content'] = result.get('content', '')
+            else:
+                client_data['content'] = result.get('error', '未知错误')
+            
+            # 发送消息给客户端
+            with app.app_context():
+                send_message_to_client(client_id, client_data)
+        
+        # 处理单个客户端ID的情况
+        if client_ids is None or len(client_ids) == 0:
+            # 生成临时客户端ID
+            client_id = f'temp_{time.time()}_{random.randint(1000, 9999)}'
+            result = process_model_request(
+                model_id, query, client_id,
+                use_simulation=SIMULATION_MODE or AI_MODELS.get(model_id, {}).get('simulation', False),
+                callback=None,  # 不使用回调，直接返回结果
+                http_session=http_session
+            )
+            return result
+        elif len(client_ids) == 1:
+            # 单个客户端ID，直接调用process_model_request
+            result = process_model_request(
+                model_id, query, client_ids[0],
+                use_simulation=SIMULATION_MODE or AI_MODELS.get(model_id, {}).get('simulation', False),
+                callback=response_callback,
+                http_session=http_session
+            )
+            return result
         else:
-            # 这里是实际调用AI模型API的代码
-            # 目前使用模拟响应
-            result = {
+            # 多个客户端ID，使用任务池处理
+            task_pool = TaskPoolManager()
+            
+            # 为每个客户端创建不同的任务
+            for cid in client_ids:
+                task_pool.submit_task(
+                    process_model_request,
+                    model_id, query, cid,
+                    use_simulation=SIMULATION_MODE or AI_MODELS.get(model_id, {}).get('simulation', False),
+                    callback=response_callback,
+                    http_session=http_session
+                )
+            
+            # 返回一个成功的响应
+            return {
                 'status': 'success',
                 'model_id': model_id,
-                'content': f"[{model_id.upper()}] This is a simulated response to: '{query}'",
+                'message': '请求已受理，结果将异步返回',
                 'timestamp': int(time.time() * 1000),
                 'response_time': int((time.time() - start_time) * 1000)
             }
-            
-        # 如果是成功结果，将其存入缓存
-        if result['status'] == 'success' and query:
-            # 如果没有提供缓存键，生成一个
-            if not cache_key:
-                cache_key = generate_cache_key(model_id, query, **kwargs)
-            
-            # 将结果存入缓存
-            result_cache.put(cache_key, result)
-            logger.info(f"Cached result for model {model_id}, cache key: {cache_key[:10]}...")
-        
-        # 发送结果到Socket.IO（如果请求ID存在）
-        if request_id:
-            with app.app_context():
-                socketio.emit('ai_response', {
-                    'request_id': request_id,
-                    'model_id': model_id,
-                    'result': result
-                })
-        
-        # 如果是批处理请求，向多个客户端发送结果
-        if client_ids and isinstance(client_ids, list):
-            with app.app_context():
-                for cid in client_ids:
-                    # 构造发送给客户端的数据
-                    client_data = {
-                        'model': model_id,
-                        'status': result.get('status', 'success'),
-                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-                    }
-                    
-                    if result.get('status') == 'success':
-                        client_data['content'] = result.get('content', '')
-                    else:
-                        client_data['content'] = result.get('error', 'Unknown error')
-                    
-                    # 发送消息给客户端
-                    send_message_to_client(cid, client_data)
-        
-        return result
     except Exception as e:
-        # 处理异常
         error_msg = str(e)
-        logger.error(f"Error in call_ai_model ({model_id}): {error_msg}")
-        logger.error(traceback.format_exc())
+        logger.error(f"调用模型时发生错误 ({model_id}): {error_msg}")
         
         # 发送错误结果到Socket.IO
         if request_id:
@@ -591,297 +769,25 @@ def call_ai_model(self, model_id, query, other_results=None, request_id=None, cl
             'response_time': int((time.time() - start_time) * 1000)
         }
 
-# API路由：提交问题给所有AI模型
+# API路由：向所有AI模型提问
 @app.route('/api/ask', methods=['POST'])
+@require_jwt
 def ask_all_models():
+    """向所有AI模型发送问题请求，重构版本"""
     try:
-        # 检查Content-Type
-        if request.content_type != 'application/json':
-            logger.warning('请求Content-Type不是application/json')
-            return jsonify({'success': False, 'message': '请使用application/json格式提交请求'}), 415
-            
-        # 尝试解析JSON数据
-        try:
-            data = request.json
-            if data is None:
-                logger.warning('请求数据为空或格式错误')
-                return jsonify({'success': False, 'message': '请求数据为空或格式错误'}), 400
-        except Exception as e:
-            logger.warning(f'解析JSON请求失败: {str(e)}')
-            return jsonify({'success': False, 'message': 'JSON格式错误，请检查请求数据'}), 400
-        
-        question = data.get('question', '')
-        other_results = data.get('other_results', {})
-        
-        # 验证问题长度
-        if not question:
-            logger.warning('提交问题为空')
-            return jsonify({'success': False, 'message': '问题不能为空'}), 400
-        
-        if len(question) > 2000:
-            logger.warning('问题过长')
-            return jsonify({'success': False, 'message': '问题长度不能超过2000个字符'}), 400
-        
-        # 验证other_results格式
-        if not isinstance(other_results, dict):
-            logger.warning('other_results格式错误')
-            return jsonify({'success': False, 'message': 'other_results必须是一个对象'}), 400
-        
-        # 获取当前客户端ID
-        client_id = request.headers.get('X-Client-ID', None)
-        if not client_id:
-            # 生成临时客户端ID
-            client_id = f'temp_{time.time()}_{random.randint(1000, 9999)}'
-            logger.info(f'未提供客户端ID，生成临时ID: {client_id}')
-        
-        logger.info(f'接收到问题: {question[:50]}... 来自客户端: {client_id}')
-        
-        # 检查系统资源使用情况
-        if PSUTIL_AVAILABLE:
-            resource_monitor = ResourceMonitor()
-            cpu_usage = resource_monitor.get_cpu_usage()
-            memory_usage = resource_monitor.get_memory_usage()
-            
-            logger.info(f'当前系统资源使用情况 - CPU: {cpu_usage:.1f}%, 内存: {memory_usage:.1f}%')
-            
-            # 根据系统资源动态调整参数
-            if cpu_usage > HIGH_CPU_THRESHOLD or memory_usage > HIGH_MEMORY_THRESHOLD:
-                logger.warning(f'系统资源使用率过高 (CPU: {cpu_usage:.1f}%, 内存: {memory_usage:.1f}%)，将启用资源保护模式')
-                # 如果资源紧张，增加批处理窗口，减少并发数
-                batch_window = BATCH_WINDOW_MS * 2
-            else:
-                batch_window = BATCH_WINDOW_MS
-        else:
-            batch_window = BATCH_WINDOW_MS
-            logger.info('系统监控模块不可用，使用默认批处理窗口')
-        
-        # 检查每个模型的缓存
-        cached_results = {}
-        models_to_process = []
-        
-        for model in AI_MODELS.keys():
-            # 构建缓存键
-            cache_key = generate_cache_key(model, question, other_results=other_results)
-            # 检查缓存
-            cached_result = result_cache.get(cache_key)
-            if cached_result and cached_result.get('status') == 'success':
-                cached_results[model] = cached_result
-                logger.info(f'从缓存获取{model}模型的结果')
-                # 立即将缓存结果发送给客户端
-                send_message_to_client(client_id, cached_result)
-            else:
-                models_to_process.append(model)
-        
-        # 如果所有模型都有缓存结果，直接返回
-        if len(cached_results) == len(AI_MODELS):
-            logger.info('所有模型结果均命中缓存，直接返回')
-            return jsonify({
-                'success': True,
-                'message': '所有模型结果均命中缓存',
-                'client_id': client_id,
-                'models_count': len(AI_MODELS),
-                'all_from_cache': True,
-                'cached_models': list(cached_results.keys())
-            })
-        
-        # 如果部分模型有缓存结果，记录信息
-        if cached_results:
-            logger.info(f'已找到{len(cached_results)}个模型的缓存结果，需处理{len(models_to_process)}个模型')
-            # 如果没有需要处理的模型，直接返回
-            if not models_to_process:
-                return jsonify({
-                    'success': True,
-                    'message': '所有模型结果均命中缓存',
-                    'client_id': client_id,
-                    'models_count': len(AI_MODELS),
-                    'all_from_cache': True,
-                    'cached_models': list(cached_results.keys())
-                })
-        
-        # 批处理逻辑
-        current_time = time.time()
-        
-        # 根据问题内容生成批处理键（对问题进行简单归一化）
-        normalized_question = question.lower().strip()[:100]  # 取前100个字符作为批处理键
-        batch_key = hashlib.md5(normalized_question.encode()).hexdigest()[:8]
-        
-        # 检查是否可以批处理
-        if batch_key not in batch_requests:
-            batch_requests[batch_key] = {
-                'question': question,
-                'other_results': other_results,
-                'clients': [client_id],
-                'created_at': current_time,
-                'models_to_process': models_to_process.copy()  # 只包含需要处理的模型
-            }
-        else:
-            # 将当前客户端添加到现有批次
-            if client_id not in batch_requests[batch_key]['clients']:
-                batch_requests[batch_key]['clients'].append(client_id)
-                
-            # 合并需要处理的模型列表，确保没有重复
-            current_models = set(batch_requests[batch_key].get('models_to_process', AI_MODELS.keys()))
-            new_models = set(models_to_process)
-            batch_requests[batch_key]['models_to_process'] = list(current_models.union(new_models))
-        
-        # 检查是否应该处理批次
-        should_process = False
-        
-        # 如果超过了批处理窗口时间
-        if current_time - batch_requests[batch_key]['created_at'] > batch_window / 1000:
-            should_process = True
-        
-        # 如果批次中的客户端数量达到阈值
-        if len(batch_requests[batch_key]['clients']) >= BATCH_CLIENT_THRESHOLD:
-            should_process = True
-        
-        if should_process:
-            # 处理批次请求
-            batch = batch_requests.pop(batch_key)
-            question_to_process = batch['question']
-            other_results_to_process = batch['other_results']
-            client_ids = batch['clients']
-            # 获取需要处理的模型列表，如果没有则处理所有模型
-            models_to_process = batch.get('models_to_process', AI_MODELS.keys())
-            
-            logger.info(f'处理批处理请求，批次大小: {len(client_ids)}，问题: {question_to_process[:30]}...')
-            
-            # 异步调用所有AI模型
-            task_ids = {}
-            try:
-                # 并行提交需要处理的模型任务
-                for model in models_to_process:
-                    try:
-                        # 构建缓存键
-                        cache_key = generate_cache_key(model, question_to_process, other_results=other_results_to_process)
-                        
-                        # 如果是批处理请求，传递client_ids参数
-                        if len(client_ids) > 1:
-                            task = call_ai_model.delay(model, question_to_process, other_results_to_process, None, client_ids, cache_key)
-                        else:
-                            task = call_ai_model.delay(model, question_to_process, other_results_to_process, client_id, None, cache_key)
-                        task_ids[model] = task.id
-                    except Exception as e:
-                        logger.error(f'提交{model}模型任务失败: {str(e)}')
-                        # 发送错误消息给所有客户端
-                        error_data = {
-                            'model': model,
-                            'status': 'error',
-                            'content': f'提交任务失败: {str(e)}',
-                            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-                        }
-                        if len(client_ids) > 1:
-                            for cid in client_ids:
-                                send_message_to_client(cid, error_data)
-                        else:
-                            send_message_to_client(client_id, error_data)
-                
-                # 检查是否有成功提交的任务
-                if not task_ids:
-                    # 如果全部失败且处于模拟模式，使用备用处理方式
-                    if SIMULATION_MODE:
-                        logger.info('所有模型任务提交失败，切换到备用处理方式')
-                        # 为每个客户端创建一个后台线程来处理请求
-                        for cid in client_ids:
-                            threading.Thread(target=handle_simulation_request, args=(cid, question_to_process, other_results_to_process, models_to_process)).start()
-                        logger.info(f'已使用备用方式处理问题，批次大小: {len(client_ids)}，模型数量: {len(models_to_process)}')
-                        return jsonify({
-                            'success': True,
-                            'message': '问题已通过备用方式提交给所有AI模型',
-                            'client_id': client_id if len(client_ids) == 1 else 'batch',
-                            'models_count': len(models_to_process),
-                            'using_fallback': True,
-                            'batch_size': len(client_ids)
-                        })
-                    else:
-                        # 非模拟模式下返回错误
-                        return jsonify({
-                            'success': False,
-                            'message': '所有模型任务提交失败，请稍后重试',
-                            'error_type': 'CeleryError'
-                        }), 503
-            except Exception as model_error:
-                logger.error(f'提交模型任务失败: {str(model_error)}')
-                # 当Redis不可用或Celery连接失败时，使用备用方式处理
-                if SIMULATION_MODE or 'Redis' in str(model_error) or 'Connection' in str(model_error):
-                    logger.info('Redis不可用或Celery连接失败，使用备用方式处理请求')
-                    # 为每个客户端创建一个后台线程来处理请求
-                    for cid in client_ids:
-                        threading.Thread(target=handle_simulation_request, args=(cid, question_to_process, other_results_to_process, models_to_process)).start()
-                    logger.info(f'已使用备用方式处理问题，批次大小: {len(client_ids)}，模型数量: {len(models_to_process)}')
-                    return jsonify({
-                        'success': True,
-                        'message': 'Redis不可用，问题已通过备用方式提交给所有AI模型',
-                        'client_id': client_id if len(client_ids) == 1 else 'batch',
-                        'models_count': len(models_to_process),
-                        'using_fallback': True,
-                        'batch_size': len(client_ids)
-                    })
-            else:
-                return jsonify({
-                    'success': False,
-                    'message': '提交模型请求失败，请稍后重试',
-                    'error_type': str(type(model_error).__name__)
-                }), 503  # 服务不可用
-        
-        # 更新最后批处理时间
-        last_batch_process_time = time.time()
-        
-        logger.info(f'成功提交所有模型任务，批次大小: {len(client_ids)}')
-        
-        # 清理过期的批处理请求
-        def cleanup_old_batches():
-            current_time = time.time()
-            expired_keys = []
-            for key, batch in batch_requests.items():
-                if current_time - batch['created_at'] > 30000 / 1000:  # 30秒过期时间
-                    expired_keys.append(key)
-            
-            for key in expired_keys:
-                # 处理过期的批次
-                expired_batch = batch_requests.pop(key)
-                expired_client_ids = expired_batch['clients']
-                logger.info(f'处理过期的批处理请求，批次大小: {len(expired_client_ids)}')
-                
-                # 异步处理过期的批次
-                def process_expired_batch():
-                    try:
-                        for cid in expired_client_ids:
-                            threading.Thread(target=handle_simulation_request, args=(cid, expired_batch['question'], expired_batch['other_results'])).start()
-                    except Exception as e:
-                        logger.error(f'处理过期批次失败: {str(e)}')
-                
-                threading.Thread(target=process_expired_batch).start()
-        
-        # 异步清理过期的批处理请求
-        threading.Thread(target=cleanup_old_batches).start()
-        
-        # 返回响应
-        response_data = {
-            'success': True,
-            'message': '问题已提交给所有AI模型',
-            'client_id': client_id if len(client_ids) == 1 else 'batch',
-            'models_count': len(AI_MODELS),
-            'task_ids': task_ids
-        }
-        
-        # 如果是批处理请求，添加批处理信息
-        if len(client_ids) > 1:
-            response_data['batch_size'] = len(client_ids)
-        
-        return jsonify(response_data)
-        
+        # 调用任务管理器中的批量查询函数
+        response = new_ask_all_models(request, AI_MODELS, result_cache, http_session)
+        return response
     except Exception as e:
-        logger.error(f'提交问题失败: {str(e)}')
-        logger.debug(traceback.format_exc())
+        logger.error(f"批量查询处理错误: {str(e)}")
         return jsonify({
             'success': False,
-            'message': '处理请求时发生错误，请稍后重试',
-            'error_type': str(type(e).__name__)
+            'message': f'处理请求时发生错误: {str(e)}'
         }), 500
 
 # API路由：重新生成指定AI模型的回答
 @app.route('/api/regenerate', methods=['POST'])
+@require_jwt
 def regenerate_model():
     try:
         # 检查Content-Type
@@ -902,6 +808,18 @@ def regenerate_model():
         model = data.get('model', '')
         question = data.get('question', '')
         other_results = data.get('other_results', {})
+        
+        # 输入验证
+        cleaned_input, error = validate_and_clean_input(
+            {'model': model, 'question': question}, 
+            {'model': str, 'question': str}
+        )
+        if error:
+            logger.error(f'输入验证失败: {error}')
+            return jsonify({'success': False, 'message': error}), 400
+        
+        model = cleaned_input['model']
+        question = cleaned_input['question']
         
         if not model or model not in AI_MODELS:
             logger.warning(f'无效的模型类型: {model}')
@@ -925,26 +843,11 @@ def regenerate_model():
         
         logger.info(f'接收到重新生成请求，模型: {model}, 问题: {question[:50]}... 来自客户端: {client_id}')
         
-        # 检查系统资源使用情况
-        if PSUTIL_AVAILABLE:
-            resource_monitor = ResourceMonitor()
-            cpu_usage = resource_monitor.get_cpu_usage()
-            memory_usage = resource_monitor.get_memory_usage()
-            
-            logger.info(f'当前系统资源使用情况 - CPU: {cpu_usage:.1f}%, 内存: {memory_usage:.1f}%')
-            
-            # 如果资源紧张，记录警告
-            if cpu_usage > HIGH_CPU_THRESHOLD or memory_usage > HIGH_MEMORY_THRESHOLD:
-                logger.warning(f'系统资源使用率过高 (CPU: {cpu_usage:.1f}%, 内存: {memory_usage:.1f}%)')
-        
         # 获取模型资源配置
         resources = MODEL_RESOURCES.get(model, {'timeout': 30, 'priority': 1, 'retries': 2})
         
-        # 构建缓存键
-        cache_key = f'{model}_regenerate_{hash(question + str(other_results))}'
-        
-        # 检查缓存中是否有结果
-        cached_result = result_cache.get(cache_key)
+        # 检查缓存
+        cached_result = check_cached_result(model, question)
         if cached_result:
             logger.info(f'从缓存中获取{model}模型的回答结果')
             # 发送缓存的结果给客户端
@@ -957,48 +860,36 @@ def regenerate_model():
                 'model_resources': resources
             })
         
-        # 异步调用指定AI模型
+        # 提交到任务池
+        task_pool = TaskPoolManager()
         try:
-            task = call_ai_model.delay(model, question, other_results, client_id, cache_key)
+            task_pool.submit_task(
+                process_model_request, 
+                model, question, client_id, 
+                use_simulation=SIMULATION_MODE,
+                http_session=http_session
+            )
             logger.info(f'已请求重新生成{model}的回答')
             return jsonify({
                 'success': True, 
                 'message': f'已请求重新生成{model}的回答',
                 'client_id': client_id,
-                'task_id': task.id,
                 'model_resources': resources
             })
         except Exception as e:
             logger.error(f'提交{model}模型任务失败: {str(e)}')
-            # 如果提交任务失败且处于模拟模式或Redis连接失败，使用备用方式处理
-            if SIMULATION_MODE or 'Redis' in str(e) or 'Connection' in str(e):
-                logger.info('Redis不可用或Celery连接失败，使用备用方式处理请求')
-                # 使用TaskPool处理备用请求
-                task_pool.submit_task(
-                    target=simulate_model_response,
-                    args=(model, question, other_results, client_id, cache_key),
-                    priority=resources['priority']
-                )
-                return jsonify({
-                    'success': True,
-                    'message': f'已通过备用方式重新生成{model}模型的回答',
-                    'client_id': client_id,
-                    'using_fallback': True,
-                    'model_resources': resources
-                })
-            else:
-                # 发送错误消息给客户端
-                error_data = {
-                    'model': model,
-                    'status': 'error',
-                    'content': f'提交任务失败: {str(e)}',
-                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
-                }
-                send_message_to_client(client_id, error_data)
-                return jsonify({
-                    'success': False,
-                    'message': f'提交任务失败: {str(e)}'
-                }), 500
+            # 发送错误消息给客户端
+            error_data = {
+                'model': model,
+                'status': 'error',
+                'content': f'提交任务失败: {str(e)}',
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            send_message_to_client(client_id, error_data)
+            return jsonify({
+                'success': False,
+                'message': f'提交任务失败: {str(e)}'
+            }), 500
         
     except Exception as e:
         logger.error(f'重新生成回答失败: {str(e)}')
@@ -1011,6 +902,7 @@ def regenerate_model():
 
 # API路由：检查服务器状态
 @app.route('/api/status', methods=['GET'])
+@require_jwt
 def check_status():
     try:
         # 检查Celery连接状态
@@ -1043,5 +935,85 @@ def check_status():
             'error_type': str(type(e).__name__)
         }), 500
 
+# API路由：用于HTTP轮询获取消息
+@app.route('/api/poll', methods=['GET'])
+@require_jwt
+def poll_messages():
+    """客户端通过HTTP轮询获取消息
+    
+    查询参数:
+        client_id: 客户端ID（必需）
+        last_id: 最后收到的消息ID（可选，用于增量获取）
+    """
+    try:
+        # 获取客户端ID
+        client_id = request.args.get('client_id')
+        if not client_id:
+            return jsonify({'success': False, 'error': 'client_id is required'}), 400
+        
+        # 获取最后收到的消息ID（如果有）
+        last_id = request.args.get('last_id')
+        
+        # 检查是否有该客户端的消息队列
+        with message_queue_lock:
+            if client_id in client_message_queues and client_message_queues[client_id]:
+                # 获取所有消息
+                messages = client_message_queues[client_id]
+                # 清空队列，防止重复获取
+                client_message_queues[client_id] = []
+                
+                # 为消息添加唯一ID
+                for i, msg in enumerate(messages):
+                    msg['id'] = f"{client_id}_{int(time.time())}_{i}"
+                
+                logger.info(f'客户端 {client_id} 通过HTTP轮询获取了 {len(messages)} 条消息')
+                return jsonify({
+                    'success': True,
+                    'messages': messages,
+                    'has_more': False
+                })
+        
+        # 如果没有新消息，返回空结果
+        return jsonify({
+            'success': True,
+            'messages': [],
+            'has_more': False
+        })
+        
+    except Exception as e:
+        logger.error(f'处理轮询请求失败: {str(e)}')
+        return jsonify({
+            'success': False,
+            'error': 'Internal server error'
+        }), 500
+
+# 定期清理过期的消息队列
+def cleanup_message_queues():
+    """定期清理过期的消息队列"""
+    while True:
+        try:
+            current_time = time.time()
+            with message_queue_lock:
+                expired_clients = []
+                for client_id, messages in client_message_queues.items():
+                    # 检查队列中的消息是否已过期（5分钟）
+                    if messages and current_time - messages[0].get('queued_at', current_time) > 300:
+                        expired_clients.append(client_id)
+                
+                # 删除过期的客户端消息队列
+                for client_id in expired_clients:
+                    del client_message_queues[client_id]
+                    logger.info(f'已清理过期的消息队列: {client_id}')
+        except Exception as e:
+            logger.error(f'清理消息队列时出错: {str(e)}')
+        
+        # 每5分钟执行一次清理
+        time.sleep(300)
+
+# 启动消息队列清理线程
+cleanup_thread = threading.Thread(target=cleanup_message_queues, daemon=True)
+cleanup_thread.start()
+
 # 注意：请使用run_backend.py启动应用，而不是直接运行此文件
 # 这样可以确保Flask和Celery服务正确启动并协同工作
+
