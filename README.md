@@ -60,7 +60,7 @@ AI Aggregate/
 ```bash
 # 克隆项目到本地
 git clone https://github.com/xingsen2005/AI_Aggregate.git
-cd AI Agent
+cd AI Aggregate
 ```
 
 #### 2. 安装后端依赖
