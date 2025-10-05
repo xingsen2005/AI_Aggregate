@@ -8,6 +8,27 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
+# HTML转义函数
+def escape_html(text):
+    """HTML转义函数，防止XSS攻击"""
+    if not isinstance(text, str):
+        return text
+    
+    html_escape_table = {
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+        '/': '&#x2F;',
+        '(': '&#40;',
+        ')': '&#41;',
+        '+': '&#43;',
+        '=': '&#61;',
+    }
+    
+    return ''.join(html_escape_table.get(c, c) for c in text)
+
 # 输入验证和清洗函数
 def validate_and_clean_input(data, schema=None):
     """验证和清洗输入数据"""
@@ -40,27 +61,6 @@ def validate_and_clean_input(data, schema=None):
                 return None, f"缺少必需字段 '{field}'"
     
     return cleaned_data, None
-
-# HTML转义函数
-def escape_html(text):
-    """HTML转义函数，防止XSS攻击"""
-    if not isinstance(text, str):
-        return text
-    
-    html_escape_table = {
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#39;',
-        '/': '&#x2F;',
-        '(': '&#40;',
-        ')': '&#41;',
-        '+': '&#43;',
-        '=': '&#61;',
-    }
-    
-    return ''.join(html_escape_table.get(c, c) for c in text)
 
 # 生成缓存键
 def generate_cache_key(model_id, query, **kwargs):

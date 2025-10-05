@@ -51,7 +51,7 @@ AI Aggregate/
 
 - **前端**：Node.js 14+ 和 npm/yarn/pnpm
 - **后端**：Python 3.8+ 和 pip
-- **可选**：Redis 用于生产环境的Celery消息代理
+- **可选**：Redis 用于生产环境的 Celery 消息代理
 
 ### 安装步骤
 
@@ -60,7 +60,7 @@ AI Aggregate/
 ```bash
 # 克隆项目到本地
 git clone https://github.com/xingsen2005/AI_Aggregate.git
-cd AI Agent
+cd AI Aggregate
 ```
 
 #### 2. 安装后端依赖
@@ -146,24 +146,9 @@ cd backend
 python -m unittest discover tests
 ```
 
-## 注意事项
-- 在生产环境中，请确保修改 CORS 配置以限制允许的源
-- 请妥善保管 API 密钥，不要将其提交到版本控制系统
-- 在生产环境中，请确保修改 `backend/app.py` 中的 CORS 配置以限制允许的源
-- 请妥善保管您的 API 密钥，不要将其提交到版本控制系统
-- 模拟模式下 AI 模型的响应是模拟数据，用于开发和测试
-
 ## 故障排除
 
 - **连接问题**：检查后端服务是否正常运行，以及前端 WebSocket 连接 URL 是否正确
 - **API密钥错误**：确保 .env 文件中配置了正确的API密钥
 - **Redis错误**：如果不需要 Redis，可以使用模拟模式启动服务
 - **端口冲突**：如果端口 5000 或 3000 已被占用，可以修改相应的配置文件
-
-## 未来改进
-
-- 添加更多 AI 模型支持
-- 实现用户认证和个性化设置
-- 添加更多测试用例
-- 优化前端用户体验
-- 提供更多配置选项

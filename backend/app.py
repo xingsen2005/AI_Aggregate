@@ -9,12 +9,14 @@ import collections
 import random
 import jwt
 
-# 设置FLASK_APP环境变量
-os.environ['FLASK_APP'] = 'app.py'
 # 为了简化测试，暂时不使用eventlet
 # import eventlet
 # eventlet.monkey_patch()
 
+# 设置FLASK_APP环境变量
+os.environ['FLASK_APP'] = 'app.py'
+
+# 导入第三方库
 from flask import Flask, request, jsonify, make_response
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
@@ -24,7 +26,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 
-# 导入新的模块
+# 导入自定义模块
 from .utils import validate_and_clean_input, escape_html, generate_cache_key, RateLimiter, safe_json_loads
 from .model_handlers import call_model_api, handle_simulation_request, format_model_response
 from .task_manager import TaskPoolManager, BatchProcessor, ask_all_models as new_ask_all_models, initialize_task_manager, process_model_request, check_cached_result
@@ -147,41 +149,68 @@ try:
 except Exception as e:
     logger.error(f"任务管理器初始化失败: {str(e)}")
 
+import psutil
+from functools import wraps
+
 # API密钥验证装饰器
 def require_api_key(f):
-    """验证请求中是否包含有效的API密钥"""
-    def decorator(*args, **kwargs):
-        # 从环境变量获取有效的API密钥列表
-        valid_api_keys = os.getenv('VALID_API_KEYS', '').split(',')
-        valid_api_keys = [key.strip() for key in valid_api_keys if key.strip()]
+    """验证API密钥的装饰器"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # 从请求头获取JWT
+        auth_header = request.headers.get('Authorization')
+        if not auth_header:
+            return jsonify({'error': 'Authorization header is missing'}), 401
         
-        # 如果没有配置有效的API密钥，允许所有请求
-        if not valid_api_keys:
-            logger.warning('没有配置有效的API密钥，允许所有请求')
+        # 提取JWT令牌
+        try:
+            auth_parts = auth_header.split()
+            if len(auth_parts) != 2 or auth_parts[0].lower() != 'bearer':
+                return jsonify({'error': 'Invalid authorization format. Use Bearer <token>'}), 401
+            token = auth_parts[1]
+        except (IndexError, AttributeError):
+            return jsonify({'error': 'Invalid authorization format'}), 401
+        
+        # 验证JWT
+        try:
+            # 使用环境变量中设置的SECRET_KEY进行验证
+            # 确保验证算法一致
+            jwt_secret = os.getenv('JWT_SECRET')
+            if not jwt_secret:
+                logger.error('JWT_SECRET is not configured')
+                return jsonify({'error': 'Internal server error during authentication'}), 500
+            
+            payload = jwt.decode(token, jwt_secret, algorithms=['HS256'], options={
+                'verify_signature': True,
+                'verify_exp': True,
+                'verify_nbf': False,
+                'verify_iat': True,
+                'verify_aud': False
+            })
+            # 将用户信息注入到请求对象中
+            user_id = payload.get('user_id')
+            username = payload.get('username')
+            
+            # 验证必要的用户信息存在
+            if not user_id or not username:
+                return jsonify({'error': 'Token missing required information'}), 401
+                
+            # 将解码后的信息添加到请求上下文中
+            request.user_info = payload
+            
+            logger.info(f'JWT验证通过: {user_id}')
             return f(*args, **kwargs)
-        
-        # 从请求头中获取API密钥
-        api_key = request.headers.get('X-API-Key')
-        
-        # 也支持从查询参数中获取API密钥
-        if not api_key:
-            api_key = request.args.get('api_key')
-        
-        # 检查API密钥是否有效
-        if not api_key or api_key not in valid_api_keys:
-            logger.warning(f'无效的API密钥: {api_key}，请求被拒绝')
-            return make_response(jsonify({
-                'success': False,
-                'error': 'Unauthorized: Invalid or missing API key'
-            }), 401)
-        
-        logger.info(f'API密钥验证通过: {api_key[:5]}...')
-        return f(*args, **kwargs)
+        except jwt.ExpiredSignatureError:
+            logger.warning('JWT token has expired')
+            return jsonify({'error': 'Token has expired'}), 401
+        except jwt.InvalidTokenError as e:
+            logger.warning(f"Invalid token: {str(e)}")
+            return jsonify({'error': 'Invalid token'}), 401
+        except Exception as e:
+            logger.error(f"JWT验证错误: {str(e)}")
+            return jsonify({'error': 'Internal server error during authentication'}), 500
     
-    # 保留原始函数的元数据
-    decorator.__name__ = f.__name__
-    decorator.__doc__ = f.__doc__
-    return decorator
+    return decorated_function
 
 # JWT验证装饰器
 def require_jwt(f):
@@ -316,7 +345,7 @@ def send_message_to_client(client_id, data):
         # 尝试通过Socket.IO发送消息
         with app.app_context():
             # 为指定客户端发送消息
-            socketio.emit('ai_response', data, room=client_id)
+            socketio.emit('message', data, room=client_id)
         logger.debug(f'已通过Socket.IO发送消息给客户端: {client_id}')
     except Exception as e:
         # 如果Socket.IO发送失败，将消息存储到队列中供轮询使用
@@ -413,23 +442,22 @@ def _is_cache_expired(cache, key, current_time=None):
     return elapsed_time > CACHE_TTL
 
 # 获取缓存，同时检查过期状态
-def get_cached_response(model_id, cache_key):
+def get_cached_response(model_id, query, **kwargs):
     """获取缓存响应，并在获取时检查是否过期（懒加载检查）"""
-    if model_id not in model_caches or not cache_key:
+    if not result_cache:
         return None
     
-    cache = model_caches[model_id]
-    cached_response = cache.get(cache_key)
+    # 生成缓存键
+    cache_key = generate_cache_key(model_id, query, **kwargs)
+    if not cache_key:
+        return None
     
-    # 懒加载检查：如果缓存存在但已过期，则删除并返回None
-    if cached_response and _is_cache_expired(cache, cache_key):
-        logger.debug(f'缓存项已过期，删除: {model_id}, {cache_key}')
-        try:
-            del cache.cache[cache_key]
-            if cache_key in cache.last_accessed:
-                del cache.last_accessed[cache_key]
-        except KeyError:
-            pass
+    cached_response = result_cache.get(cache_key)
+    
+    # 懒加载检查：如果缓存存在但已过期，则返回None
+    if cached_response and _is_cache_expired(result_cache, cache_key):
+        logger.debug(f'缓存项已过期: {model_id}, {cache_key}')
+        # LRUCache没有delete方法，所以这里不做删除操作
         return None
     
     return cached_response
@@ -458,22 +486,26 @@ class CacheManager(threading.Thread):
         current_time = time.time()
         expired_keys = []
         
-        # 同步last_accessed和cache字典
-        result_cache._sync_last_accessed()
-        
-        # 找出过期的键
-        for key, access_time in result_cache.last_accessed.items():
-            if current_time - access_time > CACHE_TTL:
-                expired_keys.append(key)
-        
-        # 删除过期的键
-        for key in expired_keys:
-            if key in result_cache.cache:
-                del result_cache.cache[key]
-                del result_cache.last_accessed[key]
-        
-        if expired_keys:
-            logger.info(f"Cleaned {len(expired_keys)} expired cache items")
+        try:
+            # 同步last_accessed和cache字典
+            result_cache._sync_last_accessed()
+            
+            # 找出过期的键
+            for key, access_time in list(result_cache.last_accessed.items()):
+                if current_time - access_time > CACHE_TTL:
+                    expired_keys.append(key)
+            
+            # 删除过期的键
+            for key in expired_keys:
+                if key in result_cache.cache:
+                    del result_cache.cache[key]
+                    if key in result_cache.last_accessed:
+                        del result_cache.last_accessed[key]
+            
+            if expired_keys:
+                logger.info(f"Cleaned {len(expired_keys)} expired cache items")
+        except Exception as e:
+            logger.error(f"Error cleaning expired cache: {str(e)}")
 
 # 启动缓存管理器
 cache_manager = CacheManager()
@@ -511,13 +543,18 @@ def generate_cache_key(model_id, query, **kwargs):
     param_str = json.dumps(cache_params, sort_keys=True, ensure_ascii=False)
     return hashlib.md5(param_str.encode('utf-8')).hexdigest()
 
-# 资源监控类
+# 系统资源监控器
 class ResourceMonitor:
     def __init__(self):
         if PSUTIL_AVAILABLE:
             self.system = psutil.Process()
         else:
             self.system = None
+        self.cpu_warning_threshold = HIGH_CPU_THRESHOLD
+        self.memory_warning_threshold = HIGH_MEMORY_THRESHOLD
+        self.disk_warning_threshold = 90  # 磁盘使用率警告阈值
+        self.last_warning_time = {}
+        self.warning_cooldown = 300  # 警告冷却时间(秒)
     
     def get_cpu_usage(self):
         if PSUTIL_AVAILABLE:
@@ -539,84 +576,113 @@ class ResourceMonitor:
         if PSUTIL_AVAILABLE:
             return self.get_cpu_usage() > HIGH_CPU_THRESHOLD or self.get_memory_usage() > HIGH_MEMORY_THRESHOLD
         return False  # 无法监控时默认不繁忙
+    
+    def _should_warn(self, resource_type):
+        """检查是否应该发送警告(基于冷却时间)"""
+        current_time = time.time()
+        last_time = self.last_warning_time.get(resource_type, 0)
+        
+        if current_time - last_time > self.warning_cooldown:
+            self.last_warning_time[resource_type] = current_time
+            return True
+        return False
+    
+    def check_all_resources(self):
+        """检查所有系统资源"""
+        try:
+            if not PSUTIL_AVAILABLE:
+                return True, {}
+            
+            # 初始化资源报告
+            resources_report = {}
+            all_ok = True
+            
+            # CPU使用情况检查
+            try:
+                cpu_percent = psutil.cpu_percent(interval=0.1, percpu=False)
+                load_avg = psutil.getloadavg() if hasattr(psutil, 'getloadavg') else (0, 0, 0)
+                cpu_ok = cpu_percent < self.cpu_warning_threshold
+                all_ok = all_ok and cpu_ok
+                
+                resources_report['cpu'] = {
+                    'usage': cpu_percent,
+                    'load_avg': load_avg,
+                    'ok': cpu_ok
+                }
+                
+                if not cpu_ok and self._should_warn('cpu'):
+                    logger.warning(f"CPU使用率过高: {cpu_percent}%, 系统负载: {load_avg}")
+            except Exception as e:
+                logger.error(f"检查CPU使用率失败: {str(e)}")
+                resources_report['cpu'] = {'usage': 0, 'load_avg': (0, 0, 0), 'ok': True}
+            
+            # 内存使用情况检查
+            try:
+                memory = psutil.virtual_memory()
+                available_mb = memory.available / (1024 * 1024)
+                memory_ok = memory.percent < self.memory_warning_threshold
+                all_ok = all_ok and memory_ok
+                
+                resources_report['memory'] = {
+                    'usage': memory.percent,
+                    'available_mb': available_mb,
+                    'ok': memory_ok
+                }
+                
+                if not memory_ok and self._should_warn('memory'):
+                    logger.warning(f"内存使用率过高: {memory.percent}%, 可用内存: {available_mb:.2f}MB")
+            except Exception as e:
+                logger.error(f"检查内存使用率失败: {str(e)}")
+                resources_report['memory'] = {'usage': 0, 'available_mb': 0, 'ok': True}
+            
+            # 磁盘使用情况检查
+            try:
+                # 尝试获取系统根目录或Windows系统分区
+                partitions = psutil.disk_partitions()
+                # 优先检查系统分区
+                system_partition = '/'  # Linux/Mac默认
+                for p in partitions:
+                    if hasattr(psutil, 'OS_WINDOWS') and getattr(psutil, 'OS_WINDOWS', False) and p.mountpoint == 'C:':
+                        system_partition = 'C:'
+                        break
+                    elif p.device.endswith('rootfs'):
+                        system_partition = p.mountpoint
+                        break
+                
+                disk = psutil.disk_usage(system_partition)
+                available_gb = disk.free / (1024 * 1024 * 1024)
+                disk_ok = disk.percent < self.disk_warning_threshold
+                all_ok = all_ok and disk_ok
+                
+                resources_report['disk'] = {
+                    'usage': disk.percent,
+                    'available_gb': available_gb,
+                    'path': system_partition,
+                    'ok': disk_ok
+                }
+                
+                if not disk_ok and self._should_warn('disk'):
+                    logger.warning(f"磁盘使用率过高: {disk.percent}%({system_partition}), 可用空间: {available_gb:.2f}GB")
+            except Exception as e:
+                logger.error(f"检查磁盘使用率失败: {str(e)}")
+                resources_report['disk'] = {'usage': 0, 'available_gb': 0, 'path': '/', 'ok': True}
+            
+            # 记录资源使用情况(定期记录，避免日志过多)
+            if random.random() < 0.1:  # 10%的概率记录
+                cpu_usage = resources_report.get('cpu', {}).get('usage', 0)
+                mem_usage = resources_report.get('memory', {}).get('usage', 0)
+                disk_usage = resources_report.get('disk', {}).get('usage', 0)
+                logger.info(f"系统资源使用情况: CPU={cpu_usage}% Mem={mem_usage}% Disk={disk_usage}%")
+            
+            return all_ok, resources_report
+        except Exception as e:
+            logger.error(f"检查系统资源失败: {str(e)}")
+            return True, {}  # 出错时默认返回资源正常
 
 # 创建资源监控实例
 resource_monitor = ResourceMonitor()
 
-# 并发控制的TaskPool类
-class TaskPool:
-    def __init__(self, max_workers=6):
-        self.max_workers = max_workers
-        self.semaphore = threading.Semaphore(max_workers)
-        self.active_tasks = []
-        self.lock = threading.Lock()
-    
-    def submit(self, task_func, *args, **kwargs):
-        with self.semaphore:
-            try:
-                return task_func(*args, **kwargs)
-            except Exception as e:
-                logger.error(f'任务执行失败: {str(e)}')
-                raise
-    
-    def submit_task(self, target, args=(), kwargs=None, priority=1):
-        """
-        提交任务到线程池
-        
-        Args:
-            target: 要执行的函数
-            args: 函数参数（元组）
-            kwargs: 函数关键字参数（字典）
-            priority: 任务优先级（数字越小优先级越高）
-        """
-        if kwargs is None:
-            kwargs = {}
-        
-        # 创建一个线程来执行任务
-        thread = threading.Thread(target=self._execute_task, args=(target, args, kwargs))
-        
-        # 存储任务信息
-        with self.lock:
-            self.active_tasks.append((thread, priority))
-        
-        # 启动线程
-        thread.start()
-        
-        return thread
-    
-    def _execute_task(self, target, args, kwargs):
-        with self.semaphore:
-            try:
-                target(*args, **kwargs)
-            except Exception as e:
-                logger.error(f'任务执行失败: {str(e)}')
-                # 可以选择在这里添加重试逻辑
-            finally:
-                # 任务完成后从活跃任务列表中移除
-                with self.lock:
-                    # 找到并移除对应的线程
-                    for i, (thread, _) in enumerate(self.active_tasks):
-                        if thread == threading.current_thread():
-                            self.active_tasks.pop(i)
-                            break
-    
-    def wait_completion(self):
-        """等待所有任务完成"""
-        threads = []
-        with self.lock:
-            threads = [thread for thread, _ in self.active_tasks]
-        
-        for thread in threads:
-            if thread.is_alive():
-                thread.join()
-    
-    def get_active_count(self):
-        """获取当前活跃任务数量"""
-        with self.lock:
-            return len(self.active_tasks)
-
-# 创建全局TaskPool实例
-task_pool = TaskPool(max_workers=min(10, len(AI_MODELS) * 2))
+# 任务池管理：使用task_manager.py中的TaskPoolManager类
 
 # 模拟AI模型响应数据
 SIMULATION_RESPONSES = {

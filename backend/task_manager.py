@@ -191,13 +191,13 @@ class BatchProcessor:
 # 缓存检查函数
 def check_cached_result(model_id, question):
     """检查是否存在缓存结果"""
-    from .app import cache  # 延迟导入以避免循环依赖
+    from .app import result_cache  # 延迟导入以避免循环依赖
     
-    if not cache or not model_id or not question:
+    if not result_cache or not model_id or not question:
         return None
     
     cache_key = generate_cache_key(model_id, question)
-    cached_result = cache.get(cache_key)
+    cached_result = result_cache.get(cache_key)
     
     if cached_result:
         logger.info(f"命中缓存: {model_id}")
@@ -205,7 +205,7 @@ def check_cached_result(model_id, question):
         if isinstance(cached_result, dict) and 'timestamp' in cached_result:
             cache_age = time.time() - cached_result['timestamp']
             if cache_age > 3600:  # 1小时后过期
-                cache.delete(cache_key)
+                # LRUCache没有delete方法，所以这里不做删除操作
                 return None
         
         return cached_result
@@ -215,9 +215,9 @@ def check_cached_result(model_id, question):
 # 缓存结果函数
 def cache_result(model_id, question, result):
     """缓存API结果"""
-    from .app import cache  # 延迟导入以避免循环依赖
+    from .app import result_cache  # 延迟导入以避免循环依赖
     
-    if not cache or not model_id or not question:
+    if not result_cache or not model_id or not question:
         return
     
     try:
@@ -226,13 +226,14 @@ def cache_result(model_id, question, result):
         if isinstance(result, dict) and 'timestamp' not in result:
             result['timestamp'] = time.time()
         
-        # 缓存时间设置为30分钟
-        cache.set(cache_key, result, timeout=1800)
+        # 使用LRUCache的put方法缓存结果
+        result_cache.put(cache_key, result)
         logger.info(f"结果已缓存: {model_id}")
     except Exception as e:
         logger.error(f"缓存结果失败: {model_id}, 错误: {str(e)}")
 
-# 系统资源监控函数def check_system_resources():
+# 系统资源监控函数
+def check_system_resources():
     """检查系统资源使用情况"""
     try:
         # 简化实现，实际应用中可能需要更详细的监控
@@ -267,7 +268,8 @@ def cache_result(model_id, question, result):
             'is_overloaded': False
         }
 
-# 发送响应到客户端的回调函数def create_response_callback(socketio=None, send_message_func=None):
+# 发送响应到客户端的回调函数
+def create_response_callback(socketio=None, send_message_func=None):
     """创建发送响应到客户端的回调函数"""
     def response_callback(result, client_id):
         """处理API响应并发送给客户端"""
@@ -479,4 +481,7 @@ def initialize_task_manager():
     
     logger.info("任务管理器初始化完成")
 
-# 确保初始化函数在模块加载时执行# 注意：在实际应用中，可能需要在应用启动时手动调用initialize_task_manager()# 这里不直接执行，以避免导入时自动初始化initialize_task_manager()
+# 确保初始化函数在模块加载时执行
+# 注意：在实际应用中，可能需要在应用启动时手动调用initialize_task_manager()
+# 这里不直接执行，以避免导入时自动初始化
+# initialize_task_manager()
