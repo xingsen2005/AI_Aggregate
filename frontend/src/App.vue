@@ -275,7 +275,8 @@ export default {
         }, {
           headers: {
             'X-Client-ID': clientId.value
-          }
+          },
+          timeout: 30000 // 设置30秒超时
         });
         
         if (response.data.success) {

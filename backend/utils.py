@@ -65,27 +65,43 @@ def validate_and_clean_input(data, schema=None):
 # 生成缓存键
 def generate_cache_key(model_id, query, **kwargs):
     """生成用于缓存的唯一键"""
-    # 创建一个包含所有相关参数的字典
-    key_dict = {
-        'model_id': model_id,
-        'query': query[:1000],  # 限制查询长度
-        'timestamp': int(time.time() / 3600),  # 每小时更新一次缓存键
-    }
-    
-    # 添加额外的关键字参数
-    for k, v in kwargs.items():
-        if isinstance(v, dict) or isinstance(v, list):
-            # 对于复杂类型，将其转换为JSON字符串并取前100个字符
-            try:
-                key_dict[k] = json.dumps(v, ensure_ascii=False)[:100]
-            except:
-                key_dict[k] = str(v)[:100]
-        else:
-            key_dict[k] = str(v)[:100]
-    
-    # 生成MD5哈希值作为缓存键
-    key_str = json.dumps(key_dict, sort_keys=True, ensure_ascii=False)
-    return hashlib.md5(key_str.encode('utf-8')).hexdigest()
+    try:
+        # 创建一个包含所有相关参数的字典
+        key_dict = {
+            'model_id': model_id,
+            'query': query[:1000],  # 限制查询长度
+            'timestamp': int(time.time() / 3600),  # 每小时更新一次缓存键
+        }
+        
+        # 添加额外的关键字参数
+        for k, v in kwargs.items():
+            if isinstance(v, dict) or isinstance(v, list):
+                # 对于复杂类型，将其转换为JSON字符串并取前100个字符
+                try:
+                    key_dict[k] = json.dumps(v, ensure_ascii=False)[:100]
+                except TypeError as e:
+                    logger.warning(f"无法序列化参数 {k}: {str(e)}")
+                    key_dict[k] = str(v)[:100]
+            else:
+                try:
+                    key_dict[k] = str(v)[:100]
+                except Exception as e:
+                    logger.warning(f"无法转换参数 {k}: {str(e)}")
+                    key_dict[k] = 'error_value'
+        
+        # 生成MD5哈希值作为缓存键
+        key_str = json.dumps(key_dict, sort_keys=True, ensure_ascii=False)
+        return hashlib.md5(key_str.encode('utf-8')).hexdigest()
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON序列化失败: {str(e)}")
+        # 返回一个基于时间戳的备用键
+        return hashlib.md5(f"error_{time.time()}".encode('utf-8')).hexdigest()
+    except TypeError as e:
+        logger.error(f"参数类型错误: {str(e)}")
+        return hashlib.md5(f"error_{time.time()}_{model_id}".encode('utf-8')).hexdigest()
+    except Exception as e:
+        logger.error(f"生成缓存键时发生未知错误: {str(e)}")
+        return hashlib.md5(f"error_{time.time()}".encode('utf-8')).hexdigest()
 
 # 请求限流类
 class RateLimiter:
@@ -96,7 +112,7 @@ class RateLimiter:
         self.lock = threading.Lock()
     
     def is_allowed(self, client_id):
-        """检查客户端是否被允许发送请求"""
+        """检查客户端是否被允许发送请求，返回布尔值"""
         current_time = time.time()
         
         with self.lock:
@@ -112,7 +128,7 @@ class RateLimiter:
             
             # 检查是否超过限制
             if len(self.request_times[client_id]) >= self.requests_per_minute:
-                return False, 60 - (current_time - self.request_times[client_id][0])
+                return False
             
             # 记录新请求时间
             self.request_times[client_id].append(current_time)

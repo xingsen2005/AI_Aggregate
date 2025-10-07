@@ -56,12 +56,13 @@ class BasicTests(unittest.TestCase):
     def test_model_list(self):
         """测试支持的AI模型列表"""
         # 模拟支持的AI模型列表
-        supported_models = ['doubao', 'deepseek', 'chatgpt', 'kimi', 'tx_hunyuan', 'gemini']
+        supported_models = ['doubao', 'deepseek', 'chatgpt', 'kimi', 'hunyuan', 'gemini']
         
         # 验证模型列表是否完整
         self.assertEqual(len(supported_models), 6, "支持的模型数量不正确")
         self.assertIn('doubao', supported_models, "缺少豆包模型支持")
         self.assertIn('chatgpt', supported_models, "缺少ChatGPT模型支持")
+        self.assertIn('hunyuan', supported_models, "缺少混元模型支持")
 
 if __name__ == '__main__':
     unittest.main()

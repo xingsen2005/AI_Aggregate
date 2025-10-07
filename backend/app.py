@@ -9,9 +9,7 @@ import collections
 import random
 import jwt
 
-# 为了简化测试，暂时不使用eventlet
-# import eventlet
-# eventlet.monkey_patch()
+# 注意：请使用run_backend.py启动应用，而不是直接运行此文件
 
 # 设置FLASK_APP环境变量
 os.environ['FLASK_APP'] = 'app.py'
@@ -56,25 +54,22 @@ celery.conf.update(app.config)
 # 定义批处理窗口大小（毫秒）
 BATCH_WINDOW_MS = 100
 
-# 批处理请求存储
-batch_requests = {}
-
-# 记录最后批处理时间
-last_batch_process_time = 0
-
-# 活跃的Socket.IO连接
-active_connections = set()
-
 # 模拟模式标志
 SIMULATION_MODE = os.environ.get('SIMULATION_MODE', 'false').lower() == 'true'
+
+# 初始化应用上下文
+app_context.set_simulation_mode(SIMULATION_MODE)
 
 # 导入系统监控库
 try:
     import psutil
     PSUTIL_AVAILABLE = True
 except ImportError:
+    logger.warning('无法导入psutil库，系统监控功能将不可用')
     PSUTIL_AVAILABLE = False
-    logging.warning('psutil库未安装，系统资源监控功能将不可用')
+
+# 模型配置
+simulation_mode = SIMULATION_MODE
 
 # 配置日志记录
 handler = logging.StreamHandler()
@@ -132,7 +127,7 @@ def get_ai_models():
     
     # 如果不在模拟模式下，检查API Key是否存在
     if not simulation_mode:
-        for model_id, model_config in models.items():
+        for _, model_config in models.items():
             if not model_config['api_key']:
                 model_config['enabled'] = False
                 model_config['disabled_reason'] = 'API Key not configured'
@@ -149,80 +144,30 @@ try:
 except Exception as e:
     logger.error(f"任务管理器初始化失败: {str(e)}")
 
-import psutil
 from functools import wraps
 
-# API密钥验证装饰器
-def require_api_key(f):
-    """验证API密钥的装饰器"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        # 从请求头获取JWT
-        auth_header = request.headers.get('Authorization')
-        if not auth_header:
-            return jsonify({'error': 'Authorization header is missing'}), 401
-        
-        # 提取JWT令牌
-        try:
-            auth_parts = auth_header.split()
-            if len(auth_parts) != 2 or auth_parts[0].lower() != 'bearer':
-                return jsonify({'error': 'Invalid authorization format. Use Bearer <token>'}), 401
-            token = auth_parts[1]
-        except (IndexError, AttributeError):
-            return jsonify({'error': 'Invalid authorization format'}), 401
-        
-        # 验证JWT
-        try:
-            # 使用环境变量中设置的SECRET_KEY进行验证
-            # 确保验证算法一致
-            jwt_secret = os.getenv('JWT_SECRET')
-            if not jwt_secret:
-                logger.error('JWT_SECRET is not configured')
-                return jsonify({'error': 'Internal server error during authentication'}), 500
-            
-            payload = jwt.decode(token, jwt_secret, algorithms=['HS256'], options={
-                'verify_signature': True,
-                'verify_exp': True,
-                'verify_nbf': False,
-                'verify_iat': True,
-                'verify_aud': False
-            })
-            # 将用户信息注入到请求对象中
-            user_id = payload.get('user_id')
-            username = payload.get('username')
-            
-            # 验证必要的用户信息存在
-            if not user_id or not username:
-                return jsonify({'error': 'Token missing required information'}), 401
-                
-            # 将解码后的信息添加到请求上下文中
-            request.user_info = payload
-            
-            logger.info(f'JWT验证通过: {user_id}')
-            return f(*args, **kwargs)
-        except jwt.ExpiredSignatureError:
-            logger.warning('JWT token has expired')
-            return jsonify({'error': 'Token has expired'}), 401
-        except jwt.InvalidTokenError as e:
-            logger.warning(f"Invalid token: {str(e)}")
-            return jsonify({'error': 'Invalid token'}), 401
-        except Exception as e:
-            logger.error(f"JWT验证错误: {str(e)}")
-            return jsonify({'error': 'Internal server error during authentication'}), 500
-    
-    return decorated_function
-
-# JWT验证装饰器
+# JWT验证装饰器（统一的认证机制）
 def require_jwt(f):
     """验证请求中是否包含有效的JWT令牌"""
-    def decorator(*args, **kwargs):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
         # 从环境变量获取JWT密钥
         jwt_secret = os.getenv('JWT_SECRET')
         
-        # 如果未配置JWT密钥，使用简单的API密钥验证
+        # 如果未配置JWT密钥，提供更有用的警告信息
         if not jwt_secret:
-            logger.warning('没有配置JWT密钥，跳过JWT验证')
-            return require_api_key(f)(*args, **kwargs)
+            logger.warning('JWT_SECRET环境变量未配置，无法进行完整的JWT验证。在生产环境中请务必配置此变量。')
+            # 在开发环境中允许跳过验证（注意：生产环境必须配置JWT_SECRET）
+            if os.getenv('FLASK_ENV') == 'development':
+                logger.info('开发环境中跳过JWT验证')
+                # 创建模拟用户信息
+                request.user_info = {'user_id': 'dev_user', 'username': 'Developer'}
+                return f(*args, **kwargs)
+            else:
+                return make_response(jsonify({
+                    'success': False,
+                    'error': 'Internal server error: Authentication configuration missing'
+                }), 500)
         
         # 从请求头中获取JWT令牌
         auth_header = request.headers.get('Authorization')
@@ -243,15 +188,45 @@ def require_jwt(f):
             }), 401)
         
         # 提取JWT令牌
-        token = auth_header.split(' ')[1]
-        
         try:
-            # 验证JWT令牌
-            decoded = jwt.decode(token, jwt_secret, algorithms=['HS256'])
-            logger.info(f'JWT验证通过: {decoded.get("user_id", "unknown")}')
+            auth_parts = auth_header.split()
+            if len(auth_parts) != 2 or auth_parts[0].lower() != 'bearer':
+                return make_response(jsonify({
+                    'success': False,
+                    'error': 'Unauthorized: Invalid authorization format. Use Bearer <token>'
+                }), 401)
+            token = auth_parts[1]
+        except (IndexError, AttributeError):
+            return make_response(jsonify({
+                'success': False,
+                'error': 'Unauthorized: Invalid authorization format'
+            }), 401)
+        
+        # 验证JWT令牌
+        try:
+            decoded = jwt.decode(token, jwt_secret, algorithms=['HS256'], options={
+                'verify_signature': True,
+                'verify_exp': True,
+                'verify_nbf': False,
+                'verify_iat': True,
+                'verify_aud': False
+            })
+            
+            # 验证必要的用户信息存在
+            user_id = decoded.get('user_id')
+            if not user_id:
+                logger.warning('JWT令牌缺少必要的用户信息')
+                return make_response(jsonify({
+                    'success': False,
+                    'error': 'Unauthorized: Token missing required information'
+                }), 401)
+            
+            logger.info(f'JWT验证通过: {user_id}')
             
             # 将解码后的信息添加到请求上下文中
             request.user_info = decoded
+            
+            return f(*args, **kwargs)
             
         except jwt.ExpiredSignatureError:
             logger.warning('JWT令牌已过期')
@@ -259,19 +234,26 @@ def require_jwt(f):
                 'success': False,
                 'error': 'Unauthorized: Token has expired'
             }), 401)
-        except jwt.InvalidTokenError:
-            logger.warning('无效的JWT令牌')
+        except jwt.InvalidTokenError as e:
+            logger.warning(f'无效的JWT令牌: {str(e)}')
             return make_response(jsonify({
                 'success': False,
                 'error': 'Unauthorized: Invalid token'
             }), 401)
-        
-        return f(*args, **kwargs)
+        except Exception as e:
+            logger.error(f'JWT验证过程中发生错误: {str(e)}')
+            return make_response(jsonify({
+                'success': False,
+                'error': 'Internal server error during authentication'
+            }), 500)
     
-    # 保留原始函数的元数据
-    decorator.__name__ = f.__name__
-    decorator.__doc__ = f.__doc__
-    return decorator
+    return decorated_function
+
+# 为了保持向后兼容性，保留require_api_key作为require_jwt的别名
+def require_api_key(f):
+    """[已废弃] 请使用require_jwt装饰器替代"""
+    logger.warning('require_api_key装饰器已废弃，请使用require_jwt装饰器替代')
+    return require_jwt(f)
 
 # 模型资源配置
 MODEL_RESOURCES = {
@@ -307,16 +289,8 @@ MODEL_RESOURCES = {
     }
 }
 
-# 创建全局的requests session对象，实现HTTP连接池
-http_session = requests.Session()
-retry_strategy = Retry(
-    total=3,
-    backoff_factor=0.3,
-    status_forcelist=[500, 502, 503, 504],
-)
-adapter = HTTPAdapter(pool_connections=20, pool_maxsize=30, max_retries=retry_strategy)
-http_session.mount('http://', adapter)
-http_session.mount('https://', adapter)
+# 保存到应用上下文中
+app_context.set_model_resources(MODEL_RESOURCES)
 
 # 缓存配置
 CACHE_TTL = 3600  # 缓存有效时间（秒）
@@ -360,6 +334,9 @@ def send_message_to_client(client_id, data):
             # 限制队列大小，防止内存溢出
             if len(client_message_queues[client_id]) > 100:
                 client_message_queues[client_id] = client_message_queues[client_id][-50:]
+
+# 导入自定义工具
+from .utils import generate_cache_key
 
 # LRU缓存实现
 class LRUCache:
@@ -416,6 +393,22 @@ class LRUCache:
         for key in self.cache:
             if key not in self.last_accessed:
                 self.last_accessed[key] = current_time
+                
+    def contains(self, key):
+        return key in self.cache
+        
+    def cleanup_expired(self, max_age_seconds):
+        """清理过期的缓存项"""
+        current_time = time.time()
+        expired_keys = [
+            key for key, timestamp in self.last_accessed.items()
+            if current_time - timestamp > max_age_seconds
+        ]
+        for key in expired_keys:
+            if key in self.cache:
+                del self.cache[key]
+                del self.last_accessed[key]
+        return len(expired_keys)
 
 # 从环境变量获取缓存配置
 CACHE_SIZE_LIMIT = int(os.environ.get('CACHE_SIZE_LIMIT', 1000))
@@ -483,27 +476,11 @@ class CacheManager(threading.Thread):
         
     def clean_expired_cache(self):
         """清理过期的缓存项"""
-        current_time = time.time()
-        expired_keys = []
-        
         try:
-            # 同步last_accessed和cache字典
-            result_cache._sync_last_accessed()
-            
-            # 找出过期的键
-            for key, access_time in list(result_cache.last_accessed.items()):
-                if current_time - access_time > CACHE_TTL:
-                    expired_keys.append(key)
-            
-            # 删除过期的键
-            for key in expired_keys:
-                if key in result_cache.cache:
-                    del result_cache.cache[key]
-                    if key in result_cache.last_accessed:
-                        del result_cache.last_accessed[key]
-            
-            if expired_keys:
-                logger.info(f"Cleaned {len(expired_keys)} expired cache items")
+            # 使用LRUCache内置的清理方法
+            cleaned_count = CACHE.cleanup_expired(CACHE_TTL)
+            if cleaned_count > 0:
+                logger.info(f"Cleaned {cleaned_count} expired cache items")
         except Exception as e:
             logger.error(f"Error cleaning expired cache: {str(e)}")
 
@@ -511,37 +488,39 @@ class CacheManager(threading.Thread):
 cache_manager = CacheManager()
 cache_manager.start()
 
-# 生成缓存键
-def generate_cache_key(model_id, query, **kwargs):
-    """生成唯一的缓存键
+# Socket.IO连接处理
+@socketio.on('connect')
+def handle_connect():
+    """处理客户端连接事件"""
+    # 获取客户端ID
+    client_id = request.args.get('client_id')
     
-    参数:
-        model_id: 模型ID
-        query: 查询文本
-        **kwargs: 其他参数
+    if not client_id:
+        logger.warning('客户端连接但没有提供client_id')
+        return False  # 拒绝连接
+    
+    # 将客户端ID添加到活跃连接集合
+    with app.app_context():
+        app_context.add_active_connection(client_id)
+        # 记录连接信息
+        logger.info(f'客户端已连接: {client_id}, 当前活跃连接数: {len(app_context.get_active_connections())}')
         
-    返回:
-        唯一的缓存键字符串，如果query为空则返回None
-    """
-    # 如果查询文本为空，不生成缓存键
-    if not query:
-        logger.warning('尝试为为空的查询生成缓存键')
-        return None
+        # 发送连接确认消息
+        emit('connect_response', {'message': '连接成功'})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """处理客户端断开连接事件"""
+    # 获取客户端ID
+    client_id = request.args.get('client_id')
     
-    # 创建参数字典，只包含影响结果的关键参数
-    cache_params = {
-        'model_id': model_id,
-        'query': query
-    }
-    
-    # 添加其他可能影响结果的参数
-    for key, value in kwargs.items():
-        if key in ['temperature', 'max_tokens', 'top_p', 'system_prompt']:
-            cache_params[key] = value
-    
-    # 将字典转换为JSON字符串，然后计算MD5哈希值
-    param_str = json.dumps(cache_params, sort_keys=True, ensure_ascii=False)
-    return hashlib.md5(param_str.encode('utf-8')).hexdigest()
+    if client_id:
+        # 从活跃连接集合中移除客户端ID
+        with app.app_context():
+            app_context.remove_active_connection(client_id)
+            logger.info(f'客户端已断开连接: {client_id}, 当前活跃连接数: {len(app_context.get_active_connections())}')
+
+
 
 # 系统资源监控器
 class ResourceMonitor:
@@ -873,7 +852,6 @@ def regenerate_model():
         
         model = data.get('model', '')
         question = data.get('question', '')
-        other_results = data.get('other_results', {})
         
         # 输入验证
         cleaned_input, error = validate_and_clean_input(
@@ -1017,27 +995,20 @@ def poll_messages():
         if not client_id:
             return jsonify({'success': False, 'error': 'client_id is required'}), 400
         
-        # 获取最后收到的消息ID（如果有）
-        last_id = request.args.get('last_id')
-        
         # 检查是否有该客户端的消息队列
-        with message_queue_lock:
-            if client_id in client_message_queues and client_message_queues[client_id]:
-                # 获取所有消息
-                messages = client_message_queues[client_id]
-                # 清空队列，防止重复获取
-                client_message_queues[client_id] = []
-                
-                # 为消息添加唯一ID
-                for i, msg in enumerate(messages):
-                    msg['id'] = f"{client_id}_{int(time.time())}_{i}"
-                
-                logger.info(f'客户端 {client_id} 通过HTTP轮询获取了 {len(messages)} 条消息')
-                return jsonify({
-                    'success': True,
-                    'messages': messages,
-                    'has_more': False
-                })
+        messages = app_context.get_client_messages(client_id)
+        
+        if messages:
+            # 为消息添加唯一ID
+            for i, msg in enumerate(messages):
+                msg['id'] = f"{client_id}_{int(time.time())}_{i}"
+            
+            logger.info(f'客户端 {client_id} 通过HTTP轮询获取了 {len(messages)} 条消息')
+            return jsonify({
+                'success': True,
+                'messages': messages,
+                'has_more': False
+            })
         
         # 如果没有新消息，返回空结果
         return jsonify({
@@ -1058,28 +1029,16 @@ def cleanup_message_queues():
     """定期清理过期的消息队列"""
     while True:
         try:
-            current_time = time.time()
-            with message_queue_lock:
-                expired_clients = []
-                for client_id, messages in client_message_queues.items():
-                    # 检查队列中的消息是否已过期（5分钟）
-                    if messages and current_time - messages[0].get('queued_at', current_time) > 300:
-                        expired_clients.append(client_id)
-                
-                # 删除过期的客户端消息队列
-                for client_id in expired_clients:
-                    del client_message_queues[client_id]
-                    logger.info(f'已清理过期的消息队列: {client_id}')
+            # 使用app_context清理过期消息
+            app_context.cleanup_stale_messages(max_age_seconds=300)  # 5分钟过期
+            logger.debug('已清理过期的消息队列')
         except Exception as e:
             logger.error(f'清理消息队列时出错: {str(e)}')
         
-        # 每5分钟执行一次清理
-        time.sleep(300)
+        # 每30秒清理一次
+        time.sleep(30)
 
 # 启动消息队列清理线程
 cleanup_thread = threading.Thread(target=cleanup_message_queues, daemon=True)
 cleanup_thread.start()
-
-# 注意：请使用run_backend.py启动应用，而不是直接运行此文件
-# 这样可以确保Flask和Celery服务正确启动并协同工作
 
