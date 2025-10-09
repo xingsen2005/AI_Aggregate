@@ -2,12 +2,12 @@
 
 ## 项目概述
 
-AI_Aggregate 是一款功能强大的多 AI 聚合应用，支持用户提交单个问题并同时向多个顶尖 AI 模型发起查询，集成各 AI 模型官方 API，实现多 AI 输出结果同步查看与对比分析。
+一款多 AI 聚合应用，支持用户提交单个问题并同时向多个顶尖 AI 模型发起查询，集成各 AI 模型官方 API，实现多 AI 输出结果同步查看与对比分析。
 
 ### 核心功能
 
-- **多模型并行查询**：同时向多个 AI 模型发送请求，大幅提高信息获取效率
-- **模拟模式**：无需配置真实 API 密钥也可体验完整功能，适合开发测试
+- **多模型并行查询**：同时向多个 AI 模型发送请求
+- **模拟模式**：无需配置真实 API 密钥也可体验完整功能
 - **任务批处理**：高效的批处理机制优化请求处理流程
 - **智能缓存**：减少重复查询，提高响应速度
 - **自动重试机制**：网络波动时自动重试，提高系统稳定性
@@ -15,7 +15,7 @@ AI_Aggregate 是一款功能强大的多 AI 聚合应用，支持用户提交单
 - **实时结果更新**：通过 WebSocket 实现结果的实时推送
 - **JWT 认证**：支持可选的安全认证机制
 
-> 注意：使用真实 AI 模型功能时，需要在 `.env` 文件中配置对应大模型平台的 API Keys
+> 注意：各平台大模型的 API Keys 请自行准备，并在 `.env` 文件中填写。
 
 ## 技术栈
 
@@ -36,16 +36,16 @@ AI_Aggregate 是一款功能强大的多 AI 聚合应用，支持用户提交单
 
 ## 支持的AI模型
 
-应用支持以下主流AI模型的集成，每种模型都可以独立启用或禁用：
+应用支持以下主流 AI 模型的集成，每种模型都可以独立启用或禁用：
 
 | 模型ID | 模型名称 | 模型描述 | API密钥环境变量 |
 |-------|---------|---------|---------------|
-| doubao | Doubao | 豆包AI，由字节跳动开发的智能对话模型 | `DOUBAO_API_KEY` |
-| deepseek | DeepSeek | 深度求索AI，专注于代码和自然语言处理 | `DEEPSEEK_API_KEY` |
-| chatgpt | ChatGPT | OpenAI开发的通用对话模型 | `OPENAI_API_KEY` |
+| doubao | Doubao | 豆包 AI，由字节跳动开发的智能对话模型 | `DOUBAO_API_KEY` |
+| deepseek | DeepSeek | 深度求索 AI，专注于代码和自然语言处理 | `DEEPSEEK_API_KEY` |
+| chatgpt | ChatGPT | OpenAI 开发的通用对话模型 | `OPENAI_API_KEY` |
 | kimi | Kimi | 月之暗面开发的长文本理解模型 | `KIMI_API_KEY` |
 | hunyuan | HunYuan | 腾讯混元大模型，支持中文优化 | `TX_HUNYUAN_API_KEY` |
-| gemini | Gemini | Google开发的多模态AI模型 | `GOOGLE_API_KEY` |
+| gemini | Gemini | Google 开发的多模态AI模型 | `GOOGLE_API_KEY` |
 
 ## 项目结构
 
@@ -53,34 +53,37 @@ AI_Aggregate 是一款功能强大的多 AI 聚合应用，支持用户提交单
 
 ```
 AI_Aggregate/
-├── frontend/                 # 前端项目目录
-│   ├── src/                  # 前端源码
-│   │   ├── main.js           # 入口文件
-│   │   ├── App.vue           # 主组件
-│   │   └── components/       # 子组件
-│   ├── package.json          # 前端依赖配置
-│   ├── package-lock.json     # 依赖版本锁定
-│   ├── vite.config.js        # Vite构建配置
-│   └── index.html            # HTML模板
-├── backend/                  # 后端项目目录
-│   ├── app.py                # Flask应用主文件
-│   ├── run_backend.py        # 后端启动脚本
-│   ├── model_handlers.py     # AI模型API处理模块
-│   ├── task_manager.py       # 任务管理和批处理
-│   ├── utils.py              # 工具函数
-│   ├── app_context.py        # 应用上下文
-│   ├── requirements.txt      # 后端依赖列表
-│   ├── .env.template         # 环境变量配置模板
-│   └── tests/                # 测试代码
-│       ├── test_basic.py     # 基础功能测试
-│       └── test_advanced.py  # 高级功能测试
-├── install_frontend_deps.bat # 前端依赖安装脚本(Windows)
-├── install_and_start_frontend.bat # 一键安装并启动前端
-├── start_frontend.ps1        # PowerShell启动前端脚本
-├── .gitignore                # Git忽略文件配置
-├── .gitattributes            # Git属性配置
-├── LICENSE                   # 开源许可证
-└── README.md                 # 项目说明文档
+├── frontend/                                           # 前端项目目录
+│   ├── src/                                            # 前端源码
+│   │   ├── main.js                                     # 入口文件
+│   │   ├── App.vue                                     # 主组件          
+│   │   └── components/                                 # 子组件目录
+│   │       ├── ModelSelector.vue                       # 模型选择器组件
+│   │       ├── TaskManager.vue                         # 任务管理组件
+│   │       ├── ResultDisplay.vue                       # 结果显示组件
+│   ├── package.json                                    # 前端依赖配置
+│   ├── package-lock.json                               # 依赖版本锁定
+│   ├── vite.config.js                                  # Vite 构建配置
+│   └── index.html                                      # HTML 模板
+├── backend/                                            # 后端项目目录
+│   ├── app.py                                          # Flask 应用主文件
+│   ├── run_backend.py                                  # 后端启动脚本
+│   ├── model_handlers.py                               # AI 模型 API 处理模块
+│   ├── task_manager.py                                 # 任务管理和批处理
+│   ├── utils.py                                        # 工具函数
+│   ├── app_context.py                                  # 应用上下文
+│   ├── requirements.txt                                # 后端依赖列表
+│   ├── .env.template                                   # 环境变量配置模板
+│   └── tests/                                          # 测试代码
+│       ├── test_basic.py                               # 基础功能测试
+│       └── test_advanced.py                            # 高级功能测试
+├── install_frontend_deps.bat                           # 前端依赖安装脚本(Windows)
+├── install_and_start_frontend.bat                      # 一键安装并启动前端
+├── start_frontend.ps1                                  # PowerShell 启动前端脚本
+├── .gitignore                                          # Git 忽略文件配置
+├── .gitattributes                                      # Git 属性配置
+├── LICENSE                                             # 开源许可证
+└── README.md                                           # 项目说明文档
 ```
 
 ## 安装指南
@@ -162,7 +165,7 @@ JWT_SECRET=
 SIMULATION_MODE=false
 ```
 
-> 注意：如果您不想配置真实 API 密钥，可以在启动后端服务时选择使用模拟模式，系统会自动设置 `SIMULATION_MODE=true`
+> 注意：如果不想配置真实 API 密钥，可以在启动后端服务时选择使用模拟模式，系统会自动设置 `SIMULATION_MODE=true`
 
 ## 使用指南
 
@@ -276,24 +279,4 @@ python -m unittest discover tests
    ```
    构建后的文件将位于 `frontend/dist` 目录
 
-4. **使用Nginx提供前端服务**，并反向代理后端API请求
-
-## 开发规范
-
-1. **代码风格**：遵循PEP 8规范（Python）和ESLint规范（JavaScript）
-2. **提交信息**：清晰描述变更内容，遵循语义化版本控制
-3. **测试**：在提交代码前运行单元测试，确保功能正常
-
-## 贡献指南
-
-欢迎对项目进行贡献！请遵循以下步骤：
-
-1. Fork 项目仓库
-2. 创建新的功能分支
-3. 提交你的更改
-4. 推送到远程分支
-5. 创建 Pull Request
-
-## 许可证
-
-MIT License
+4. **使用 Nginx 提供前端服务**，并反向代理后端 API 请求。
